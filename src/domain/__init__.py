@@ -1,1 +1,2 @@
-from .models import Base, User,Profile
+from .config import ENVIROMENT,DB_URL
+from .db import engine, Base
