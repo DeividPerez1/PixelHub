@@ -1,7 +1,7 @@
 [project]
 name = "bandhub"
 version= "0.1.0"
-description "A virtual enviroment where people share content"
+description= "A virtual enviroment where people share content"
 authors= [{name= "Deivid Michael"}]
 readme= "README.md"
 requires-python =">=3.10"
