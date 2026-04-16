@@ -76,7 +76,3 @@ class PostFav(Base):
     __tablename__="post_fav"
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("user.id",ondelete="CASCADE"), nullable=False, primary_key=True)
     post_id: Mapped[int] = mapped_column(Integer, ForeignKey("post.id",ondelete="CASCADE"), nullable=False, primary_key=True)
-
-
-
-Base.metadata.create_all(engine)

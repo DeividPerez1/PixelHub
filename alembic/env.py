@@ -9,6 +9,7 @@ import os
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, BASE_DIR)
 from domain.db import Base,engine
+from domain import models
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -23,6 +24,8 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
+print(f"Tablas detectadas en Base: {Base.metadata.tables.keys()}")
+
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
@@ -46,7 +49,7 @@ def run_migrations_offline() -> None:
     url = engine.url
     context.configure(
         url=url,
-        target_metadata=target_metadata,
+        target_metadata=Base.metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -66,7 +69,7 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, target_metadata=Base.metadata
         )
 
         with context.begin_transaction():
