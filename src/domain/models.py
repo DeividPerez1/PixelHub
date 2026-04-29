@@ -16,10 +16,12 @@ class Role(Base):
     
 class User(Base):
     __tablename__="user"
+    def __repr__(self):
+        return f"id:{self.id} username:{self.username} email:{self.email} created at: {self.created_at}"
     id: Mapped[int]= mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(50),nullable=False)
     email: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    password: Mapped[str] = mapped_column(String(100), nullable=False)
+    password: Mapped[str] = mapped_column(String(100), nullable=True)
     created_at: Mapped[date] = mapped_column(Date, default=date.today,nullable=False)
     role_id: Mapped[int] = mapped_column(Integer, ForeignKey("rol.id"), nullable=False)
 
