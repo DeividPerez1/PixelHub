@@ -1,3 +1,12 @@
 # PixelHub
 Social
-para usar el alembic alembic -c PixelHub\alembic.ini 
+GetAll ->done
+get->done
+save -> done
+delete -> done
+update -> done
+unit of work ->Done
+notbooks ->working
+repository ->working
+specific repository ->working
+

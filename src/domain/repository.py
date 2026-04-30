@@ -14,7 +14,10 @@ class Repository(Generic[K,V]):
         if v.id == None:
             self.session.add(v)
         else:
-            raise ValueError("Not implemented yet")
+            if v.username=="":
+                print("esta vacio") ######
+            else:
+                raise ValueError("Already implemented")
     def get(self,id: K)-> V:
         return self.session.get(self.model,id)
     def get_all(self)-> Iterable[V]:
@@ -25,8 +28,6 @@ class Repository(Generic[K,V]):
         status = inspect(v)
         if not status.persistent:
             self.session.merge(v)
-        else:
-            raise ValueError("Not Correct Update")
     def _validate(self, k:K)->None:
         ...
 
