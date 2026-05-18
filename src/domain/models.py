@@ -8,6 +8,8 @@ from .db import Base, engine
 
 
 class Role(Base):
+    def __repr__(self):
+        return f"[bold]ID:{self.id} Name:{self.name} description:{self.description} last update: {self.last_update}"
     __tablename__ = "rol"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -18,7 +20,7 @@ class Role(Base):
 class User(Base):
     __tablename__="user"
     def __repr__(self):
-        return f"id:{self.id} username:{self.username} email:{self.email} created at: {self.created_at}"
+        return f"id:{self.id} username:{self.username} email:{self.email} created at: {self.created_at} last update: {self.last_update}"
     id: Mapped[int]= mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(50),nullable=False)
     email: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
@@ -31,6 +33,8 @@ class User(Base):
 
 class Profile(Base):
     __tablename__="profile"
+    def __repr__(self):
+        return f"id:{self.id} user id:{self.user_id} First Name:{self.first_name} Last Name:{self.last_name} Bio:{self.bio} Phone Number:{self.phone_number} Location:{self.location} Birth Date:{self.birth_date}"
     id: Mapped[int]= mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("user.id",ondelete="CASCADE"), unique=True, nullable=False)
     first_name: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -55,6 +59,8 @@ class PostTags(Base):
 
 class Tag(Base):
     __tablename__="tag"
+    def __repr__(self):
+        return f"ID:{self.id} Name:{self.name} Last Update:{self.last_update}"
     id: Mapped[int]= mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     last_update:Mapped[date] =mapped_column(Date,default=date.today,onupdate=date.today,nullable=True)
@@ -67,6 +73,8 @@ class Category(Base):
 
 class Post(Base):
     __tablename__="post"
+    def __repr__(self):
+        return f"ID:{self.id} Title:{self.title} Category Id:{self.category_id} User Id:{self.user_id} Content:{self.content} Creation Date:{self.creation_date} View Count:{self.viewCount} Last Update:{self.last_update}"
     id: Mapped[int]= mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(100), nullable=False)
     img: Mapped[str] = mapped_column(String(250), nullable=True)

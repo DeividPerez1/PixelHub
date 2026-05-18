@@ -63,6 +63,8 @@ class UserRepository(Repository[int,User]):
 class RoleRepository(Repository[int,Role]):
     def __init__(self, session:Session):
         super().__init__(session, Role)
+    def __repr__(self):
+        return f"{self.role}"
     def _validate(self, role:Role)->None:
         if role.name is None:
             raise ValueError("Name is mandatory")
