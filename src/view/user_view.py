@@ -18,9 +18,9 @@ def show_user_main_menu():
     table.add_row("2","Delete")
     table.add_row("3","update")
     table.add_row("4","Show Them")
-    table.add_column("5","Get")
-    table.add_column("6","Get by Username")
-    table.add_column("7","Get by Email")
+    table.add_row("5","Get")
+    table.add_row("6","Get by Username")
+    table.add_row("7","Get by Email")
     table.add_row("0","exit")
     console.print(table)
     
