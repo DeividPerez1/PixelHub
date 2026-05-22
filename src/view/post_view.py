@@ -19,6 +19,10 @@ def show_post_main_menu():
     table.add_row("2","Delete")
     table.add_row("3","update")
     table.add_row("4","Show Them")
+    table.add_row("5","Get by id")
+    table.add_row("6","Get by category")
+    table.add_row("7","Get by User")
+    table.add_row("8","Get Last")
     table.add_row("0","exit")
     console.print(table)
     
@@ -61,9 +65,28 @@ def show_post_main_menu():
         elif option=="4":
             result=post_Rep.get_all()
             for i in result:
-                console.print(f"\t{i}")      
+                console.print(f"\n{i}")    
+        elif option=="5":
+            id=Prompt.ask("[bold yellow]ID:[bold yellow] ")
+            result=post_Rep.get(id)
+            console.print(result)  
+        elif option=="6":
+            cat=Prompt.ask("[bold yellow]Category id:[bold yellow] ")
+            result=post_Rep.get_by_category(cat)
+            for i in result:
+                print(f"\n{i}")
+        elif option=="7":
+            user=Prompt.ask("[bold yellow]User id:[bold yellow] ")
+            result=post_Rep.get_by_user(user)
+            for i in result:
+                print(f"\n{i}")
+        elif option=="8":
+            result=post_Rep.get_last()
+            for i in result:
+                print(f"\n{i}")
+        
         else:
-            session.commit()
             return
+        session.commit()
         
         

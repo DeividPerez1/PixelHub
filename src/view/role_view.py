@@ -18,6 +18,7 @@ def show_role_main_menu():
     table.add_row("2","Delete")
     table.add_row("3","update")
     table.add_row("4","Show Them")
+    table.add_column("5","Get")
     table.add_row("0","exit")
     console.print(table)
     
@@ -49,9 +50,14 @@ def show_role_main_menu():
         elif option=="4":
             result=role_Rep.get_all()
             for i in result:
-                console.print(f"\t{i}")      
+                console.print(f"\t{i}") 
+        elif option=="5":
+            id=Prompt.ask("[bold yellow]ID:[bold yellow] ")
+            result=role_Rep.get(id)
+            console.print(result)     
+        
         else:
-            session.commit()
             return
+        session.commit()
         
         
