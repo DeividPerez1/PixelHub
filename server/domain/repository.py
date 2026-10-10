@@ -91,7 +91,7 @@ class PostRepository(Repository[int,Post]):
         stmt=select(self.model).where(self.model.user_id== user_id)
         return self.session.scalars(stmt).all()
     def get_last(self,limit:int=10)->Iterable[Post]:
-        stmt= (select (self.model) .order_by(self.model.creation_date) .limit(limit))
+        stmt= (select (self.model) .order_by(self.model.creation_date.desc()) .limit(limit))
         return self.session.scalars(stmt).all()
     def increment_viewCount(self, post_id:int)->None:
         post=self.get(post_id)

@@ -6,8 +6,8 @@ from sqlalchemy import pool
 from alembic import context
 import sys
 import os 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))
-sys.path.insert(0, BASE_DIR)
+SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, SERVER_DIR)
 from domain.db import Base,engine
 from domain import models
 
