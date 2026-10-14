@@ -40,3 +40,13 @@ Para poner en marcha la aplicación, simplemente ejecuta el archivo principal:
 
 Bash
 python src/app.py
+
+## Pruebas automatizadas
+
+Las pruebas unitarias no necesitan una base de datos ni un servidor activos. Desde la carpeta `PixelHub`, ejecútalas con:
+
+```bash
+python -m pytest tests -v
+```
+
+También puedes ejecutarlas desde la carpeta `tests` con `python -m pytest -v`.
