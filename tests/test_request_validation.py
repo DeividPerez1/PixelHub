@@ -1,6 +1,7 @@
 import json
 
 import server as router
+from protocol import validate_request
 
 
 class FakeConnection:
@@ -89,5 +90,33 @@ def test_server_defaults_missing_request_data_to_empty_object(monkeypatch):
     assert response == {
         "status": "ok",
         "message": "Connection successful.",
+        "data": None,
+    }
+
+
+def test_protocol_rejects_missing_identifier():
+    request, response = validate_request(
+        {"accion": "get_user", "datos": {}},
+        {"get_user"},
+    )
+
+    assert request is None
+    assert response == {
+        "status": "error",
+        "message": "The field 'id' must be an integer.",
+        "data": None,
+    }
+
+
+def test_protocol_rejects_invalid_identifier():
+    request, response = validate_request(
+        {"accion": "get_user", "datos": {"id": "abc"}},
+        {"get_user"},
+    )
+
+    assert request is None
+    assert response == {
+        "status": "error",
+        "message": "The field 'id' must be an integer.",
         "data": None,
     }

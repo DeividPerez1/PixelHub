@@ -1,7 +1,11 @@
+"""TCP server that receives actions from the PixelHub client."""
+
 import json
 import socket
+from typing import Any
 
 from domain.db import Session, engine
+from domain.dtos import Response
 from domain.repository import (
     CategoryRepository,
     PostRepository,
@@ -16,10 +20,12 @@ from services.profile_service import process_profile_actions
 from services.role_service import process_role_actions
 from services.tag_service import process_tag_actions
 from services.user_service import process_user_actions
+from protocol import error_response, validate_request
+from shared.config import BUFFER_SIZE, SERVER_HOST, SERVER_PORT
 
 
-HOST = "127.0.0.1"
-PORT = 5000
+HOST = SERVER_HOST
+PORT = SERVER_PORT
 
 ACTION_HANDLERS = {
     "add_user": ("user", process_user_actions),
@@ -69,12 +75,67 @@ REPOSITORIES = {
 }
 
 
-def _send_json(connection, response):
+def _send_json(connection, response: Response | dict[str, Any]):
     connection.sendall(json.dumps(response).encode("utf-8"))
 
 
+def _read_request(connection) -> bytes:
+    """Read request chunks until the client closes its sending side."""
+    request_data = bytearray()
+
+    while True:
+        chunk = connection.recv(BUFFER_SIZE)
+        if not chunk:
+            break
+        request_data.extend(chunk)
+
+    return bytes(request_data)
+
+
+def _process_database_action(action, data):
+    entity, processor = ACTION_HANDLERS[action]
+    session = Session(bind=engine)
+
+    try:
+        repository = REPOSITORIES[entity](session)
+        return processor(action, data, repository, session)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _create_response(request: dict[str, Any]) -> dict[str, Any]:
+    validated_request, validation_error = validate_request(
+        request, set(ACTION_HANDLERS)
+    )
+    if validation_error:
+        return validation_error
+
+    action = validated_request["action"]
+    data = validated_request["data"]
+    if action == "ping":
+        return {
+            "status": "ok",
+            "message": "Connection successful.",
+            "data": None,
+        }
+
+    return _process_database_action(action, data)
+
+
+def _close_socket(connection):
+    """Close a real socket while keeping the helper easy to test."""
+    close = getattr(connection, "close", None)
+    if close is not None:
+        close()
+
+
 def start_server():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
         server_socket.listen()
@@ -82,62 +143,25 @@ def start_server():
 
         while True:
             connection, address = server_socket.accept()
-            with connection:
-                session = None
-                try:
-                    request_data = bytearray()
-                    while True:
-                        chunk = connection.recv(4096)
-                        if not chunk:
-                            break
-                        request_data.extend(chunk)
 
-                    if not request_data:
-                        continue
+            try:
+                request_data = _read_request(connection)
+                if not request_data:
+                    continue
 
-                    request = json.loads(request_data.decode("utf-8"))
-                    action = request.get("accion")
-                    data = request.get("datos", {})
-                    if data is None:
-                        data = {}
-
-                    if action == "ping":
-                        response = {
-                            "status": "ok",
-                            "message": "Connection successful.",
-                            "data": None,
-                        }
-                    elif action not in ACTION_HANDLERS:
-                        response = {
-                            "status": "error",
-                            "message": f"Unknown action: {action}",
-                            "data": None,
-                        }
-                    elif not isinstance(data, dict):
-                        response = {
-                            "status": "error",
-                            "message": "Request data must be a JSON object.",
-                            "data": None,
-                        }
-                    else:
-                        entity, processor = ACTION_HANDLERS[action]
-                        with Session(bind=engine) as session:
-                            repository = REPOSITORIES[entity](session)
-                            response = processor(action, data, repository, session)
-
-                    _send_json(connection, response)
-                except Exception as error:
-                    print(f"Server request error from {address}: {error}")
-                    if session is not None:
-                        session.rollback()
-                    _send_json(
-                        connection,
-                        {
-                            "status": "error",
-                            "message": f"Internal server error: {error}",
-                            "data": None,
-                        },
-                    )
+                request = json.loads(request_data.decode("utf-8"))
+                response = _create_response(request)
+                _send_json(connection, response)
+            except Exception as error:
+                print(f"Server request error from {address}: {error}")
+                _send_json(
+                    connection,
+                    error_response(f"Internal server error: {error}"),
+                )
+            finally:
+                _close_socket(connection)
+    finally:
+        _close_socket(server_socket)
 
 
 if __name__ == "__main__":
