@@ -50,8 +50,9 @@ Then open a second terminal and start the client:
 python client/app.py
 ```
 
-The default server address is `127.0.0.1:5000`. Both programs read this
-configuration from `shared/config.py`.
+The default server address is `127.0.0.1:5000`. Both programs define their
+TCP settings directly at the top of their own files (`server/server.py` and
+`client/network_client.py`).
 
 ## Communication protocol
 

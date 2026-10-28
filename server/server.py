@@ -1,5 +1,10 @@
 """TCP server that receives actions from the PixelHub client."""
 
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 5000
+SOCKET_TIMEOUT = 10
+BUFFER_SIZE = 4096
+
 import json
 import socket
 from typing import Any
@@ -21,7 +26,6 @@ from services.role_service import process_role_actions
 from services.tag_service import process_tag_actions
 from services.user_service import process_user_actions
 from protocol import error_response, validate_request
-from shared.config import BUFFER_SIZE, SERVER_HOST, SERVER_PORT
 
 
 HOST = SERVER_HOST

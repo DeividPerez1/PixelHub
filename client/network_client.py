@@ -1,10 +1,13 @@
 """Small TCP client used by the PixelHub command-line interface."""
 
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 5000
+SOCKET_TIMEOUT = 10
+BUFFER_SIZE = 4096
+
 import json
 import socket
 from typing import Any
-
-from shared.config import BUFFER_SIZE, SERVER_HOST, SERVER_PORT, SOCKET_TIMEOUT
 
 
 def _error_response(message: str) -> dict[str, Any]:
