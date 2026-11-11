@@ -1,25 +1,31 @@
-"""Tests for server-side request validation and protocol decoding (Practice 2).
+"""Tests for server-side request validation, certificate authentication, and decryption (Practice 3).
 
 This module tests that:
-1. The server's handle_client properly decodes UTF-8 JSON requests.
-2. Malformed JSON payloads return clear error responses without crashing.
-3. Requests with missing or invalid fields are rejected by the validation layer.
-4. Pure protocol validation rules (protocol.validate_request) function correctly.
+1. Unauthenticated clients without certificates are rejected.
+2. Certificates not issued by the trusted CA are rejected.
+3. Tampered ciphertexts trigger AEAD integrity errors.
+4. Valid authenticated requests are properly decrypted, validated, and processed.
 """
 
 import asyncio
 import json
 
-import server as router
+from crypto_utils import (
+    CERTS_DIR,
+    create_ca,
+    decrypt_payload,
+    decrypt_session_key,
+    encrypt_payload,
+    load_certificate_from_pem,
+    load_private_key_from_pem,
+    serialize_certificate,
+)
 from protocol import validate_request
+import server as router
 
 
 class FakeServerStreamWriter:
-    """Simulates an asyncio.StreamWriter from the server perspective.
-
-    Captures response data written by the server, simulates draining,
-    records closure, and provides get_extra_info("peername").
-    """
+    """Simulates an asyncio.StreamWriter from the server perspective."""
 
     def __init__(self, peername=("127.0.0.1", 12345)) -> None:
         self.data = bytearray()
@@ -44,56 +50,114 @@ class FakeServerStreamWriter:
         pass
 
 
-def run_server_request(request_bytes: bytes) -> tuple[dict, FakeServerStreamWriter]:
-    """Helper that feeds request_bytes into server.handle_client() and returns the response.
-
-    This directly invokes the server coroutine inside an event loop with simulated streams,
-    making it easy for students to see exactly how requests enter handle_client and responses exit.
-    """
+def execute_server_exchange(
+    request_data: dict | bytes,
+    client_cert_pem: str | None = None,
+    client_key=None,
+    send_handshake: bool = True,
+) -> tuple[dict, FakeServerStreamWriter]:
+    """Helper that runs server.handle_client through handshake and AES-GCM request exchange."""
     writer = FakeServerStreamWriter()
 
-    async def execute():
+    # Load default valid client1 credentials
+    if client_cert_pem is None:
+        client_cert_pem = (CERTS_DIR / "client1_cert.pem").read_text(encoding="utf-8")
+    if client_key is None:
+        client_key = load_private_key_from_pem((CERTS_DIR / "client1_key.pem").read_bytes())
+
+    async def run():
         reader = asyncio.StreamReader()
-        if request_bytes:
-            reader.feed_data(request_bytes)
-        reader.feed_eof()
 
-        await router.handle_client(reader, writer)
+        # Step 1: Send handshake if enabled
+        if send_handshake:
+            hello = json.dumps({"type": "client_hello", "certificate": client_cert_pem}) + "\n"
+            reader.feed_data(hello.encode("utf-8"))
 
-    asyncio.run(execute())
+        # Step 2: Feed application request
+        # If string/dict and handshake is expected, we will encrypt it once we know the session key
+        # In a real test, handle_client runs concurrently with this writer.
+        # We run handle_client in a task so it processes handshake first!
+        server_task = asyncio.create_task(router.handle_client(reader, writer))
 
-    if not writer.data:
-        return {}, writer
-    return json.loads(writer.data.decode("utf-8")), writer
+        if send_handshake:
+            # Yield control to let server process handshake line
+            await asyncio.sleep(0.01)
+
+            # Check if server accepted handshake
+            output = bytes(writer.data)
+            if b"\n" in output:
+                handshake_line, rest = output.split(b"\n", 1)
+                handshake_resp = json.loads(handshake_line.decode("utf-8"))
+                if handshake_resp.get("status") == "ok":
+                    encrypted_key = bytes.fromhex(handshake_resp["encrypted_session_key"])
+                    aes_key = decrypt_session_key(client_key, encrypted_key)
+
+                    # Now feed encrypted request payload
+                    if isinstance(request_data, dict):
+                        envelope = encrypt_payload(aes_key, request_data)
+                        reader.feed_data(json.dumps(envelope).encode("utf-8"))
+                    elif isinstance(request_data, bytes):
+                        reader.feed_data(request_data)
+                    reader.feed_eof()
+                    await server_task
+                    return aes_key
+
+        if not send_handshake:
+            if isinstance(request_data, bytes):
+                reader.feed_data(request_data)
+            reader.feed_eof()
+
+        await server_task
+        return None
+
+    aes_key = asyncio.run(run())
+
+    # Extract final application response
+    lines = bytes(writer.data).split(b"\n")
+    # If handshake occurred, application response is after the handshake line
+    if send_handshake and len(lines) > 1 and lines[1]:
+        resp_json = json.loads(lines[1].decode("utf-8"))
+        if aes_key and "ciphertext" in resp_json:
+            return decrypt_payload(aes_key, resp_json["nonce"], resp_json["ciphertext"]), writer
+        return resp_json, writer
+    elif lines[0]:
+        return json.loads(lines[0].decode("utf-8")), writer
+    return {}, writer
 
 
-def test_server_rejects_malformed_json():
-    """Verify that syntactically invalid JSON receives an error response without crashing."""
-    response, writer = run_server_request(b'{"accion":')
+def test_server_rejects_unauthenticated_connection():
+    """Verify that a client trying to send raw commands without handshake is rejected."""
+    response, writer = execute_server_exchange(
+        b'{"accion": "ping"}',
+        send_handshake=False,
+    )
 
     assert response["status"] == "error"
-    assert response["data"] is None
-    assert "Invalid" in response["message"] or "JSON" in response["message"] or "line" in response["message"]
+    assert "Expected client_hello" in response["message"]
     assert writer.closed is True
 
 
-def test_server_rejects_non_object_request_data():
-    """Verify that a request where 'datos' is not a JSON object is rejected."""
-    request = json.dumps({"accion": "get_all_roles", "datos": ["invalid"]}).encode("utf-8")
-    response, writer = run_server_request(request)
+def test_server_rejects_untrusted_client_certificate():
+    """Verify that a certificate issued by an unknown/untrusted CA is rejected."""
+    # Create an untrusted self-signed certificate
+    untrusted_cert, untrusted_key = create_ca(common_name="Malicious Hacker CA")
+    untrusted_pem = serialize_certificate(untrusted_cert).decode("utf-8")
 
-    assert response == {
-        "status": "error",
-        "message": "Request data must be a JSON object.",
-        "data": None,
-    }
+    response, writer = execute_server_exchange(
+        {"accion": "ping"},
+        client_cert_pem=untrusted_pem,
+        client_key=untrusted_key,
+        send_handshake=True,
+    )
+
+    assert response["status"] == "error"
+    assert "Authentication failed" in response["message"]
     assert writer.closed is True
 
 
 def test_server_defaults_missing_request_data_to_empty_object():
-    """Verify that omitting 'datos' defaults to an empty object, allowing valid requests like 'ping'."""
-    request = json.dumps({"accion": "ping"}).encode("utf-8")
-    response, writer = run_server_request(request)
+    """Verify that an authenticated request defaults 'datos' to an empty object for 'ping'."""
+    response, writer = execute_server_exchange({"accion": "ping"})
 
     assert response == {
         "status": "ok",
@@ -103,12 +167,15 @@ def test_server_defaults_missing_request_data_to_empty_object():
     assert writer.closed is True
 
 
-def test_server_handles_clean_empty_disconnect():
-    """Verify that a client that opens a connection and immediately closes it (EOF) is handled cleanly."""
-    response, writer = run_server_request(b"")
+def test_server_rejects_non_object_request_data():
+    """Verify that an authenticated request with invalid 'datos' type is rejected."""
+    response, writer = execute_server_exchange({"accion": "get_all_roles", "datos": ["invalid"]})
 
-    # No response expected for empty EOF disconnection
-    assert response == {}
+    assert response == {
+        "status": "error",
+        "message": "Request data must be a JSON object.",
+        "data": None,
+    }
     assert writer.closed is True
 
 

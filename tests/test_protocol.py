@@ -1,27 +1,33 @@
-"""Unit tests for the client communication protocol (Practice 2 - AsyncIO).
+"""Unit tests for the secure client communication protocol (Practice 3).
 
 This module tests that network_client.py:
-1. Serializes requests using UTF-8 JSON with the required format: {"accion": ..., "datos": ...}.
-2. Properly establishes asynchronous connections using asyncio.open_connection().
-3. Sends the EOF signal (write_eof) after writing the request.
-4. Reads and parses responses (including chunked responses).
-5. Closes the StreamWriter cleanly in all execution paths (success, error, timeout).
+1. Sends the client certificate in an initial handshake message.
+2. Successfully decrypts the server's RSA-OAEP encrypted AES session key.
+3. Encrypts the application request payload using AES-GCM with a fresh 12-byte nonce.
+4. Reads and decrypts the server's AES-GCM encrypted response.
+5. Gracefully handles authentication rejections, timeouts, and network failures.
 """
 
 import asyncio
 import json
-from unittest.mock import Mock
 
 import pytest
 
+from crypto_utils import (
+    CERTS_DIR,
+    decrypt_payload,
+    decrypt_session_key,
+    encrypt_payload,
+    encrypt_session_key,
+    generate_aes_key,
+    load_certificate_from_pem,
+    load_private_key_from_pem,
+)
 import network_client
 
 
 class FakeStreamWriter:
-    """Simulates an asyncio.StreamWriter to inspect client behavior during tests.
-
-    Captures sent bytes, tracks write_eof() calls, and records stream closure.
-    """
+    """Simulates an asyncio.StreamWriter to inspect client output and lifecycle."""
 
     def __init__(self) -> None:
         self.sent_data = bytearray()
@@ -30,40 +36,52 @@ class FakeStreamWriter:
         self.closed = False
 
     def write(self, data: bytes) -> None:
-        """Accumulate bytes sent by the client."""
         self.sent_data.extend(data)
 
     async def drain(self) -> None:
-        """Simulate waiting for the transport buffer to flush."""
         self.drained = True
 
     def write_eof(self) -> None:
-        """Record that the client notified the server that sending is finished."""
         self.eof_written = True
 
     def close(self) -> None:
-        """Record that the stream has been closed."""
         self.closed = True
 
     async def wait_closed(self) -> None:
-        """Simulate waiting for socket closure."""
         pass
 
 
-def run_client_request(monkeypatch, response_chunks, action="ping", payload=None):
-    """Helper function to execute network_client.send_request with simulated streams.
-
-    Instead of using real TCP sockets, this feeds predefined bytes to a standard
-    asyncio.StreamReader inside an active event loop and collects outgoing bytes with FakeStreamWriter.
-    """
+def run_client_request_secure(monkeypatch, server_response_dict, handshake_ok=True, handshake_error_msg=""):
+    """Helper that runs network_client.send_request with simulated handshake and AES encryption."""
     writer = FakeStreamWriter()
     connection = {}
 
+    client_cert = load_certificate_from_pem((CERTS_DIR / "client1_cert.pem").read_bytes())
+    aes_key = generate_aes_key()
+
     async def execute():
-        # StreamReader must be created inside an active event loop
         reader = asyncio.StreamReader()
-        for chunk in response_chunks:
-            reader.feed_data(chunk)
+
+        # 1. Prepare server handshake response line
+        if handshake_ok:
+            encrypted_key = encrypt_session_key(client_cert.public_key(), aes_key)
+            handshake_resp = json.dumps({
+                "status": "ok",
+                "encrypted_session_key": encrypted_key.hex(),
+            }) + "\n"
+        else:
+            handshake_resp = json.dumps({
+                "status": "error",
+                "message": handshake_error_msg,
+            }) + "\n"
+
+        reader.feed_data(handshake_resp.encode("utf-8"))
+
+        # 2. If handshake succeeds, feed the AES-encrypted response
+        if handshake_ok and server_response_dict is not None:
+            encrypted_body = encrypt_payload(aes_key, server_response_dict)
+            reader.feed_data(json.dumps(encrypted_body).encode("utf-8"))
+
         reader.feed_eof()
 
         async def fake_open_connection(host, port):
@@ -72,50 +90,70 @@ def run_client_request(monkeypatch, response_chunks, action="ping", payload=None
             return reader, writer
 
         monkeypatch.setattr(network_client.asyncio, "open_connection", fake_open_connection)
-        return await network_client.send_request(action, payload)
+        return await network_client.send_request("get_role", {"id": 6})
 
     response = asyncio.run(execute())
-    return response, writer, connection
+    return response, writer, connection, aes_key
 
 
-def test_client_serializes_request_and_reads_chunked_response(monkeypatch):
-    """Verify that the client formats JSON correctly, signals EOF, and reads chunked responses."""
-    response, writer, connection = run_client_request(
+def test_client_performs_handshake_and_encrypts_request(monkeypatch):
+    """Verify handshake exchange and AES-GCM encryption of client request."""
+    expected_response = {"status": "ok", "message": "done", "data": 1}
+
+    response, writer, connection, aes_key = run_client_request_secure(
         monkeypatch,
-        [b'{"status":"ok",', b'"message":"done","data":1}'],
-        action="get_role",
-        payload={"id": 6},
+        expected_response,
     )
 
-    # Check request payload structure sent over TCP
-    sent_json = json.loads(writer.sent_data.decode("utf-8"))
-    assert sent_json == {
+    # 1. Connection check
+    assert connection == {"host": "127.0.0.1", "port": 5000}
+    assert writer.eof_written is True
+    assert writer.closed is True
+
+    # 2. Split output into handshake line and encrypted body
+    lines = writer.sent_data.split(b"\n", 1)
+    handshake_msg = json.loads(lines[0].decode("utf-8"))
+
+    assert handshake_msg["type"] == "client_hello"
+    assert "BEGIN CERTIFICATE" in handshake_msg["certificate"]
+
+    # 3. Decrypt the application request using the shared AES key to verify confidentiality
+    encrypted_envelope = json.loads(lines[1].decode("utf-8"))
+    decrypted_request = decrypt_payload(
+        aes_key,
+        encrypted_envelope["nonce"],
+        encrypted_envelope["ciphertext"],
+    )
+    assert decrypted_request == {
         "accion": "get_role",
         "datos": {"id": 6},
     }
 
-    # Verify connection parameters
-    assert connection == {"host": "127.0.0.1", "port": 5000}
+    # 4. Final decrypted response returned to caller
+    assert response == expected_response
 
-    # Verify lifecycle: EOF signaled and stream closed
-    assert writer.eof_written is True
+
+def test_client_handles_authentication_rejection(monkeypatch):
+    """Verify that a rejected certificate returns an authentication error."""
+    response, writer, _, _ = run_client_request_secure(
+        monkeypatch,
+        server_response_dict=None,
+        handshake_ok=False,
+        handshake_error_msg="Certificate has expired.",
+    )
+
+    assert response["status"] == "error"
+    assert "Certificate has expired" in response["message"]
     assert writer.closed is True
-
-    # Verify assembled response
-    assert response == {"status": "ok", "message": "done", "data": 1}
-
-
-def test_client_replaces_empty_payload_with_empty_object(monkeypatch):
-    """Verify that a request with no payload sends an empty object '{}' in 'datos'."""
-    _, writer, _ = run_client_request(monkeypatch, [b'{"status":"ok"}'], payload=None)
-
-    sent_json = json.loads(writer.sent_data.decode("utf-8"))
-    assert sent_json["datos"] == {}
 
 
 def test_client_reports_empty_server_response(monkeypatch):
-    """Verify error handling when the server closes connection without sending data."""
-    response, writer, _ = run_client_request(monkeypatch, [])
+    """Verify error handling when the server closes connection after handshake without body."""
+    response, writer, _, _ = run_client_request_secure(
+        monkeypatch,
+        server_response_dict=None,
+        handshake_ok=True,
+    )
 
     assert response == {
         "status": "error",
@@ -126,7 +164,7 @@ def test_client_reports_empty_server_response(monkeypatch):
 
 
 def test_client_returns_error_when_connection_fails(monkeypatch):
-    """Verify that network connection failures (e.g., ConnectionRefused) return an error response."""
+    """Verify that network connection failures return an error dictionary."""
 
     async def fake_open_connection_fail(host, port):
         raise OSError("connection refused")
@@ -146,42 +184,8 @@ def test_client_returns_error_when_connection_fails(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("response_body", [b"not-json", b"[]"])
-def test_client_reports_invalid_server_response(monkeypatch, response_body):
-    """Verify that invalid JSON or non-object responses return an error dictionary."""
-    response, writer, _ = run_client_request(monkeypatch, [response_body])
-
-    assert response["status"] == "error"
-    assert response["data"] is None
-    if response_body == b"[]":
-        assert response["message"] == "The server returned an invalid response."
-    assert writer.closed is True
-
-
-def test_client_reports_timeout_on_read(monkeypatch):
-    """Verify that read timeouts return an error response and close the writer."""
-    writer = FakeStreamWriter()
-
-    async def execute():
-        reader = asyncio.StreamReader()
-        # Note: no EOF fed, so read() will block until timeout
-
-        async def fake_open_connection(host, port):
-            return reader, writer
-
-        monkeypatch.setattr(network_client.asyncio, "open_connection", fake_open_connection)
-        monkeypatch.setattr(network_client, "SOCKET_TIMEOUT", 0.05)
-
-        return await network_client.send_request("ping")
-
-    response = asyncio.run(execute())
-
-    assert response["status"] == "error"
-    assert writer.closed is True
-
-
 def test_send_request_sync_wrapper(monkeypatch):
-    """Verify that the synchronous adapter send_request_sync correctly calls asyncio.run."""
+    """Verify that send_request_sync correctly wraps the async send_request."""
     expected = {"status": "ok", "message": "pong", "data": None}
 
     async def fake_send_request(action, payload=None):

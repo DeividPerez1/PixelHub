@@ -1,9 +1,26 @@
-"""Asynchronous TCP server for the PixelHub client."""
+"""Asynchronous TCP server with certificate authentication and AES-GCM encryption."""
 
 import asyncio
 import json
+import sys
+from pathlib import Path
 from typing import Any, Callable
 
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from crypto_utils import (
+    CERTS_DIR,
+    decrypt_payload,
+    encrypt_payload,
+    encrypt_session_key,
+    ensure_certificates_exist,
+    generate_aes_key,
+    load_certificate_from_pem,
+    verify_certificate_against_ca,
+)
 from domain.db import Session, engine
 from domain.dtos import Response
 from domain.repository import (
@@ -22,13 +39,15 @@ from services.role_service import process_role_actions
 from services.tag_service import process_tag_actions
 from services.user_service import process_user_actions
 
-
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5000
 SOCKET_TIMEOUT = 10
 
 HOST = SERVER_HOST
 PORT = SERVER_PORT
+
+# Path to the trusted Certification Authority (CA) certificate
+CA_CERT_PATH = CERTS_DIR / "ca_cert.pem"
 
 ActionProcessor = Callable[
     [str, dict[str, Any], Any, Session],
@@ -83,24 +102,17 @@ REPOSITORIES = {
 }
 
 
-def _encode_response(response: Response | dict[str, Any]) -> bytes:
-    """Encode a response as UTF-8 JSON."""
-    return json.dumps(response).encode("utf-8")
-
-
-def _decode_request(request_data: bytes) -> dict[str, Any]:
-    """Decode a UTF-8 JSON request."""
-    request = json.loads(request_data.decode("utf-8"))
-    if not isinstance(request, dict):
-        raise ValueError("The request must be a JSON object.")
-    return request
+def _get_ca_certificate():
+    """Load the trusted root CA certificate from disk (generates certs if missing)."""
+    ensure_certificates_exist()
+    return load_certificate_from_pem(CA_CERT_PATH.read_bytes())
 
 
 def _process_database_action(
     action: str,
     data: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run the existing synchronous service and database workflow."""
+    """Run the existing synchronous service and database workflow in a worker thread."""
     entity, processor = ACTION_HANDLERS[action]
     session = Session(bind=engine)
 
@@ -136,53 +148,107 @@ async def _create_response(request: dict[str, Any]) -> dict[str, Any]:
     return await asyncio.to_thread(_process_database_action, action, data)
 
 
-async def _send_response(
+async def _handle_handshake(
+    reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    response: Response | dict[str, Any],
-) -> None:
-    """Write a JSON response and wait until it is handed to the OS."""
-    writer.write(_encode_response(response))
-    # Drain prevents an unbounded write buffer when a client is slow.
+) -> bytes | None:
+    """Authenticate client certificate against trusted CA and establish AES session key.
+
+    Returns the shared AES session key (bytes) on success, or None on failure.
+    """
+    handshake_line = await asyncio.wait_for(reader.readline(), timeout=SOCKET_TIMEOUT)
+    if not handshake_line:
+        return None
+
+    try:
+        hello_msg = json.loads(handshake_line.decode("utf-8"))
+    except Exception as error:
+        error_resp = json.dumps({"status": "error", "message": f"Malformed handshake: {error}"}) + "\n"
+        writer.write(error_resp.encode("utf-8"))
+        await writer.drain()
+        return None
+
+    # Verify message structure and certificate presence
+    if hello_msg.get("type") != "client_hello" or "certificate" not in hello_msg:
+        error_resp = json.dumps({"status": "error", "message": "Expected client_hello with certificate."}) + "\n"
+        writer.write(error_resp.encode("utf-8"))
+        await writer.drain()
+        return None
+
+    # Load and validate client certificate against the trusted CA
+    try:
+        client_cert = load_certificate_from_pem(hello_msg["certificate"].encode("utf-8"))
+        ca_cert = _get_ca_certificate()
+        is_valid, reason = verify_certificate_against_ca(client_cert, ca_cert)
+        if not is_valid:
+            error_resp = json.dumps({"status": "error", "message": f"Authentication failed: {reason}"}) + "\n"
+            writer.write(error_resp.encode("utf-8"))
+            await writer.drain()
+            return None
+    except Exception as error:
+        error_resp = json.dumps({"status": "error", "message": f"Invalid certificate format: {error}"}) + "\n"
+        writer.write(error_resp.encode("utf-8"))
+        await writer.drain()
+        return None
+
+    # Generate AES session key and wrap it using client public key (RSA-OAEP)
+    aes_key = generate_aes_key()
+    encrypted_key = encrypt_session_key(client_cert.public_key(), aes_key)
+
+    accept_msg = json.dumps({
+        "status": "ok",
+        "encrypted_session_key": encrypted_key.hex(),
+    }) + "\n"
+    writer.write(accept_msg.encode("utf-8"))
     await writer.drain()
+
+    return aes_key
 
 
 async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
-    """Process one client connection and close it safely."""
+    """Process one secure client connection with authentication, AES encryption, and safe cleanup."""
     address = writer.get_extra_info("peername")
 
     try:
-        # Read until the client sends EOF, preserving the existing protocol.
-        request_data = await asyncio.wait_for(
+        # Phase 1: Authenticate client and establish AES session key
+        aes_key = await _handle_handshake(reader, writer)
+        if aes_key is None:
+            return
+
+        # Phase 2: Read encrypted application request until EOF
+        encrypted_data = await asyncio.wait_for(
             reader.read(),
             timeout=SOCKET_TIMEOUT,
         )
-        if not request_data:
+        if not encrypted_data:
             return
 
-        request = _decode_request(request_data)
+        # Decrypt payload using the established AES-GCM session key
+        try:
+            envelope = json.loads(encrypted_data.decode("utf-8"))
+            request = decrypt_payload(aes_key, envelope["nonce"], envelope["ciphertext"])
+        except Exception as error:
+            error_envelope = encrypt_payload(aes_key, error_response(f"Decryption error: {error}"))
+            writer.write(json.dumps(error_envelope).encode("utf-8"))
+            await writer.drain()
+            return
+
+        # Execute application logic and routing
         response = await _create_response(request)
-        await _send_response(writer, response)
+
+        # Encrypt response with AES-GCM and send back to client
+        encrypted_response = encrypt_payload(aes_key, response)
+        writer.write(json.dumps(encrypted_response).encode("utf-8"))
+        await writer.drain()
+
     except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError):
         print(f"Client disconnected or timed out: {address}")
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        try:
-            await _send_response(writer, error_response(str(error)))
-        except (ConnectionResetError, BrokenPipeError):
-            print(f"Client disconnected before receiving an error: {address}")
     except Exception as error:
-        print(f"Server request error from {address}: {error}")
-        try:
-            await _send_response(
-                writer,
-                error_response(f"Internal server error: {error}"),
-            )
-        except (ConnectionResetError, BrokenPipeError):
-            print(f"Client disconnected before receiving an error: {address}")
+        print(f"Server error from {address}: {error}")
     finally:
-        # Always release the connection, including after client failures.
         writer.close()
         try:
             await writer.wait_closed()
@@ -191,12 +257,13 @@ async def handle_client(
 
 
 async def start_server() -> None:
-    """Start the asynchronous server and serve clients indefinitely."""
+    """Start the secure asynchronous server."""
+    _get_ca_certificate()  # Ensure certificates are generated before listening
     server = await asyncio.start_server(handle_client, HOST, PORT)
     addresses = ", ".join(
         str(socket.getsockname()) for socket in server.sockets or []
     )
-    print(f"PixelHub async server listening on {addresses}")
+    print(f"PixelHub secure async server listening on {addresses}")
 
     async with server:
         await server.serve_forever()

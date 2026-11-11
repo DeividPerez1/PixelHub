@@ -1,18 +1,18 @@
 # PixelHub communication protocol
 
-## Transport
+## Transport and Security
 
-The client and server communicate asynchronously through non-blocking TCP sockets using Python's `asyncio` framework.
+The client and server communicate asynchronously through non-blocking TCP sockets using Python's `asyncio` framework with hybrid cryptographic security:
 
 - Server address: `127.0.0.1`
 - Server port: `5000`
 - Character encoding: UTF-8
 - Message format: JSON
 - Concurrency: Multiple clients are handled concurrently via `asyncio.start_server`.
-- One request is sent for each connection.
+- **Phase 1 (Handshake):** The client sends its public X.509 certificate (`{"type": "client_hello", "certificate": "<pem>"}`). The server validates the certificate against the trusted Root CA. If valid, the server generates a 256-bit AES session key, encrypts it using the client's public key with **RSA-OAEP**, and sends back `{"status": "ok", "encrypted_session_key": "<hex>"}`.
+- **Phase 2 (Encrypted Exchange):** The client decrypts the AES session key using its private key. All application requests and responses are encrypted using **AES-256-GCM** with a fresh 12-byte nonce (`{"nonce": "<hex>", "ciphertext": "<hex>"}`).
 - The client signals the end of the request by sending an EOF (`writer.write_eof()`).
-- The server reads asynchronously until EOF (`await reader.read()`).
-- The server writes the JSON response, drains the transport buffer (`await writer.drain()`), and closes the connection cleanly (`writer.close()` and `await writer.wait_closed()`).
+- The server reads asynchronously until EOF (`await reader.read()`), decrypts the request, processes it, encrypts the response, drains the transport buffer, and closes the connection cleanly (`writer.close()` and `await writer.wait_closed()`).
 
 ## Request format
 

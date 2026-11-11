@@ -5,8 +5,8 @@ users, roles, profiles, posts, categories, and tags.
 
 The application uses two programs:
 
-- An asynchronous TCP server that manages concurrent clients and coordinates with the database.
-- A command-line client that communicates with the server.
+- A secure asynchronous TCP server that manages concurrent clients, authenticates them via X.509 certificates, encrypts communications with AES-GCM, and coordinates with the database.
+- A command-line client that communicates securely with the server.
 
 ## Architecture Diagram
 
@@ -146,6 +146,20 @@ Errors use the same structure with `status` set to `error` and `data` set to
 ```
 
 See [PROTOCOL.md](PROTOCOL.md) for all supported actions and required fields.
+
+## Security and Cryptography (Practice 3)
+
+PixelHub implements a hybrid cryptographic architecture based on the UVic Python Cryptography module:
+
+1. **Client Authentication:** Before application requests are accepted, the client presents an X.509 certificate. The server verifies the certificate's validity and digital signature against a trusted Root CA (`certs/ca_cert.pem`).
+2. **Session Key Establishment:** The server generates a random 256-bit AES session key and encrypts it using the client's public key with **RSA-OAEP** (SHA-256). The client decrypts this session key using its private key.
+3. **Confidentiality & Integrity:** All application request and response bodies are encrypted using **AES-256-GCM** with a fresh 12-byte nonce per message. Any tampering with the ciphertext causes decryption to fail.
+4. **Certificate Management:** Certificates can be inspected or generated using:
+   ```bash
+   python scripts/generate_certs.py
+   ```
+
+For an in-depth architectural breakdown and sequence diagrams, see [docs/practice3_cryptography_architecture.md](docs/practice3_cryptography_architecture.md).
 
 ## Tests
 
