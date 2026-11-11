@@ -2,17 +2,17 @@
 
 ## Transport
 
-The client and server communicate through a blocking TCP socket.
+The client and server communicate asynchronously through non-blocking TCP sockets using Python's `asyncio` framework.
 
 - Server address: `127.0.0.1`
 - Server port: `5000`
 - Character encoding: UTF-8
 - Message format: JSON
+- Concurrency: Multiple clients are handled concurrently via `asyncio.start_server`.
 - One request is sent for each connection.
-- The client closes its sending side after sending the request.
-- The server reads until the client finishes sending.
-
-The server processes one client at a time, as required by the project.
+- The client signals the end of the request by sending an EOF (`writer.write_eof()`).
+- The server reads asynchronously until EOF (`await reader.read()`).
+- The server writes the JSON response, drains the transport buffer (`await writer.drain()`), and closes the connection cleanly (`writer.close()` and `await writer.wait_closed()`).
 
 ## Request format
 

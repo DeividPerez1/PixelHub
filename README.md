@@ -5,8 +5,55 @@ users, roles, profiles, posts, categories, and tags.
 
 The application uses two programs:
 
-- A TCP server that works with the database.
+- An asynchronous TCP server that manages concurrent clients and coordinates with the database.
 - A command-line client that communicates with the server.
+
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph Clients["Clients Layer (Concurrent CLI)"]
+        direction TB
+        C1["Client 1: Rich Menu (client/app.py)"] --> NC1["network_client.py (send_request)"]
+        C2["Client 2: Rich Menu (client/app.py)"] --> NC2["network_client.py (send_request)"]
+        Cn["Client N: Rich Menu (client/app.py)"] --> NCn["network_client.py (send_request)"]
+    end
+
+    NC1 -- "TCP (JSON + EOF)" --> Listener
+    NC2 -- "TCP (JSON + EOF)" --> Listener
+    NCn -- "TCP (JSON + EOF)" --> Listener
+
+    subgraph Server["AsyncIO Server Layer (server/server.py)"]
+        direction TB
+        Listener["asyncio.start_server (127.0.0.1:5000)"]
+        
+        subgraph Tasks["Concurrent Tasks (1 per client connection)"]
+            T1["handle_client(reader, writer) #1"]
+            T2["handle_client(reader, writer) #2"]
+            Tn["handle_client(reader, writer) #N"]
+        end
+
+        Listener --> Tasks
+        Tasks --> Router["validate_request() & ACTION_HANDLERS"]
+    end
+
+    Router -- "'ping' action" --> InstantResp["Immediate Response (No DB)"]
+    InstantResp -.-> Tasks
+
+    Router -- "CRUD actions" --> Offload["asyncio.to_thread(_process_database_action)"]
+
+    subgraph ThreadWorkers["Worker Thread Pool (Synchronous DB Operations)"]
+        direction TB
+        Offload --> Worker["Worker Thread (Isolated from Event Loop)"]
+        Worker --> Session["Dedicated Session: Session(bind=engine)"]
+        Worker --> Repos["Repositories: UserRepository, RoleRepository..."]
+        Worker --> Services["Services: user_service, role_service..."]
+    end
+
+    Session --> DB[("Database: PostgreSQL / SQLite")]
+    ThreadWorkers -. "Response JSON" .-> Tasks
+    Tasks -- "writer.write() + await drain()" --> Clients
+```
 
 ## Requirements
 
@@ -56,9 +103,12 @@ TCP settings directly at the top of their own files (`server/server.py` and
 
 ## Communication protocol
 
-The client and server exchange UTF-8 encoded JSON through a blocking TCP
-socket. A request contains an action in `accion` and its input values in
-`datos`:
+The client and server exchange UTF-8 encoded JSON through non-blocking TCP
+sockets managed by Python's `asyncio` framework. The server supports multiple
+simultaneous client connections, offloading synchronous database queries to
+worker threads (`asyncio.to_thread`) to ensure the event loop remains responsive.
+
+A request contains an action in `accion` and its input values in `datos`:
 
 ```json
 {
@@ -99,8 +149,9 @@ See [PROTOCOL.md](PROTOCOL.md) for all supported actions and required fields.
 
 ## Tests
 
-The tests use mocks where a database or socket is not needed. Run them from
-the project directory:
+The test suite covers protocol serialization, request validation, routing,
+services, and asynchronous concurrency (including multiple simultaneous clients
+and non-blocking database queries). Run them from the project directory:
 
 ```bash
 python -m pytest tests
