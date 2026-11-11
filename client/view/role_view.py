@@ -2,7 +2,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from network_client import send_request
+from network_client import send_request_sync as send_request
 from view.helpers import display_response
 
 

@@ -1,100 +1,119 @@
+"""Tests for server-side request validation and protocol decoding (Practice 2).
+
+This module tests that:
+1. The server's handle_client properly decodes UTF-8 JSON requests.
+2. Malformed JSON payloads return clear error responses without crashing.
+3. Requests with missing or invalid fields are rejected by the validation layer.
+4. Pure protocol validation rules (protocol.validate_request) function correctly.
+"""
+
+import asyncio
 import json
 
 import server as router
 from protocol import validate_request
 
 
-class FakeConnection:
-    def __init__(self, request_data):
-        self.request_data = request_data
-        self.response_data = bytearray()
+class FakeServerStreamWriter:
+    """Simulates an asyncio.StreamWriter from the server perspective.
 
-    def __enter__(self):
-        return self
+    Captures response data written by the server, simulates draining,
+    records closure, and provides get_extra_info("peername").
+    """
 
-    def __exit__(self, *args):
-        return False
+    def __init__(self, peername=("127.0.0.1", 12345)) -> None:
+        self.data = bytearray()
+        self.peername = peername
+        self.closed = False
 
-    def recv(self, size):
-        request_data, self.request_data = self.request_data, b""
-        return request_data
+    def get_extra_info(self, name: str, default=None):
+        if name == "peername":
+            return self.peername
+        return default
 
-    def sendall(self, data):
-        self.response_data.extend(data)
+    def write(self, data: bytes) -> None:
+        self.data.extend(data)
 
-
-class FakeListener:
-    def __init__(self, request_data):
-        self.connection = FakeConnection(request_data)
-        self.accepted = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def setsockopt(self, *args):
+    async def drain(self) -> None:
         pass
 
-    def bind(self, address):
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
         pass
 
-    def listen(self):
-        pass
 
-    def accept(self):
-        if self.accepted:
-            raise KeyboardInterrupt
-        self.accepted = True
-        return self.connection, ("127.0.0.1", 12345)
+def run_server_request(request_bytes: bytes) -> tuple[dict, FakeServerStreamWriter]:
+    """Helper that feeds request_bytes into server.handle_client() and returns the response.
+
+    This directly invokes the server coroutine inside an event loop with simulated streams,
+    making it easy for students to see exactly how requests enter handle_client and responses exit.
+    """
+    writer = FakeServerStreamWriter()
+
+    async def execute():
+        reader = asyncio.StreamReader()
+        if request_bytes:
+            reader.feed_data(request_bytes)
+        reader.feed_eof()
+
+        await router.handle_client(reader, writer)
+
+    asyncio.run(execute())
+
+    if not writer.data:
+        return {}, writer
+    return json.loads(writer.data.decode("utf-8")), writer
 
 
-def run_server_request(monkeypatch, request_data):
-    listener = FakeListener(request_data)
-    monkeypatch.setattr(router.socket, "socket", lambda *args: listener)
-
-    try:
-        router.start_server()
-    except KeyboardInterrupt:
-        pass
-
-    return json.loads(listener.connection.response_data.decode("utf-8"))
-
-
-def test_server_rejects_malformed_json(monkeypatch):
-    response = run_server_request(monkeypatch, b'{"accion":')
+def test_server_rejects_malformed_json():
+    """Verify that syntactically invalid JSON receives an error response without crashing."""
+    response, writer = run_server_request(b'{"accion":')
 
     assert response["status"] == "error"
-    assert response["message"].startswith("Internal server error:")
     assert response["data"] is None
+    assert "Invalid" in response["message"] or "JSON" in response["message"] or "line" in response["message"]
+    assert writer.closed is True
 
 
-def test_server_rejects_non_object_request_data(monkeypatch):
+def test_server_rejects_non_object_request_data():
+    """Verify that a request where 'datos' is not a JSON object is rejected."""
     request = json.dumps({"accion": "get_all_roles", "datos": ["invalid"]}).encode("utf-8")
-
-    response = run_server_request(monkeypatch, request)
+    response, writer = run_server_request(request)
 
     assert response == {
         "status": "error",
         "message": "Request data must be a JSON object.",
         "data": None,
     }
+    assert writer.closed is True
 
 
-def test_server_defaults_missing_request_data_to_empty_object(monkeypatch):
+def test_server_defaults_missing_request_data_to_empty_object():
+    """Verify that omitting 'datos' defaults to an empty object, allowing valid requests like 'ping'."""
     request = json.dumps({"accion": "ping"}).encode("utf-8")
-
-    response = run_server_request(monkeypatch, request)
+    response, writer = run_server_request(request)
 
     assert response == {
         "status": "ok",
         "message": "Connection successful.",
         "data": None,
     }
+    assert writer.closed is True
+
+
+def test_server_handles_clean_empty_disconnect():
+    """Verify that a client that opens a connection and immediately closes it (EOF) is handled cleanly."""
+    response, writer = run_server_request(b"")
+
+    # No response expected for empty EOF disconnection
+    assert response == {}
+    assert writer.closed is True
 
 
 def test_protocol_rejects_missing_identifier():
+    """Unit test for protocol.validate_request: missing required 'id'."""
     request, response = validate_request(
         {"accion": "get_user", "datos": {}},
         {"get_user"},
@@ -109,6 +128,7 @@ def test_protocol_rejects_missing_identifier():
 
 
 def test_protocol_rejects_invalid_identifier():
+    """Unit test for protocol.validate_request: non-integer 'id'."""
     request, response = validate_request(
         {"accion": "get_user", "datos": {"id": "abc"}},
         {"get_user"},

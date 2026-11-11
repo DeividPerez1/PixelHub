@@ -1,13 +1,8 @@
-"""TCP server that receives actions from the PixelHub client."""
+"""Asynchronous TCP server for the PixelHub client."""
 
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 5000
-SOCKET_TIMEOUT = 10
-BUFFER_SIZE = 4096
-
+import asyncio
 import json
-import socket
-from typing import Any
+from typing import Any, Callable
 
 from domain.db import Session, engine
 from domain.dtos import Response
@@ -19,19 +14,28 @@ from domain.repository import (
     TagRepository,
     UserRepository,
 )
+from protocol import error_response, validate_request
 from services.category_service import process_category_actions
 from services.post_service import process_post_actions
 from services.profile_service import process_profile_actions
 from services.role_service import process_role_actions
 from services.tag_service import process_tag_actions
 from services.user_service import process_user_actions
-from protocol import error_response, validate_request
 
+
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 5000
+SOCKET_TIMEOUT = 10
 
 HOST = SERVER_HOST
 PORT = SERVER_PORT
 
-ACTION_HANDLERS = {
+ActionProcessor = Callable[
+    [str, dict[str, Any], Any, Session],
+    dict[str, Any],
+]
+
+ACTION_HANDLERS: dict[str, tuple[str, ActionProcessor]] = {
     "add_user": ("user", process_user_actions),
     "delete_user": ("user", process_user_actions),
     "update_user": ("user", process_user_actions),
@@ -79,24 +83,24 @@ REPOSITORIES = {
 }
 
 
-def _send_json(connection, response: Response | dict[str, Any]):
-    connection.sendall(json.dumps(response).encode("utf-8"))
+def _encode_response(response: Response | dict[str, Any]) -> bytes:
+    """Encode a response as UTF-8 JSON."""
+    return json.dumps(response).encode("utf-8")
 
 
-def _read_request(connection) -> bytes:
-    """Read request chunks until the client closes its sending side."""
-    request_data = bytearray()
-
-    while True:
-        chunk = connection.recv(BUFFER_SIZE)
-        if not chunk:
-            break
-        request_data.extend(chunk)
-
-    return bytes(request_data)
+def _decode_request(request_data: bytes) -> dict[str, Any]:
+    """Decode a UTF-8 JSON request."""
+    request = json.loads(request_data.decode("utf-8"))
+    if not isinstance(request, dict):
+        raise ValueError("The request must be a JSON object.")
+    return request
 
 
-def _process_database_action(action, data):
+def _process_database_action(
+    action: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the existing synchronous service and database workflow."""
     entity, processor = ACTION_HANDLERS[action]
     session = Session(bind=engine)
 
@@ -110,9 +114,11 @@ def _process_database_action(action, data):
         session.close()
 
 
-def _create_response(request: dict[str, Any]) -> dict[str, Any]:
+async def _create_response(request: dict[str, Any]) -> dict[str, Any]:
+    """Validate a request and execute its action without blocking the loop."""
     validated_request, validation_error = validate_request(
-        request, set(ACTION_HANDLERS)
+        request,
+        set(ACTION_HANDLERS),
     )
     if validation_error:
         return validation_error
@@ -126,47 +132,75 @@ def _create_response(request: dict[str, Any]) -> dict[str, Any]:
             "data": None,
         }
 
-    return _process_database_action(action, data)
+    # Run synchronous SQLAlchemy and service code in a worker thread.
+    return await asyncio.to_thread(_process_database_action, action, data)
 
 
-def _close_socket(connection):
-    """Close a real socket while keeping the helper easy to test."""
-    close = getattr(connection, "close", None)
-    if close is not None:
-        close()
+async def _send_response(
+    writer: asyncio.StreamWriter,
+    response: Response | dict[str, Any],
+) -> None:
+    """Write a JSON response and wait until it is handed to the OS."""
+    writer.write(_encode_response(response))
+    # Drain prevents an unbounded write buffer when a client is slow.
+    await writer.drain()
 
 
-def start_server():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+async def handle_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> None:
+    """Process one client connection and close it safely."""
+    address = writer.get_extra_info("peername")
 
     try:
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind((HOST, PORT))
-        server_socket.listen()
-        print(f"PixelHub server listening on {HOST}:{PORT}...")
+        # Read until the client sends EOF, preserving the existing protocol.
+        request_data = await asyncio.wait_for(
+            reader.read(),
+            timeout=SOCKET_TIMEOUT,
+        )
+        if not request_data:
+            return
 
-        while True:
-            connection, address = server_socket.accept()
-
-            try:
-                request_data = _read_request(connection)
-                if not request_data:
-                    continue
-
-                request = json.loads(request_data.decode("utf-8"))
-                response = _create_response(request)
-                _send_json(connection, response)
-            except Exception as error:
-                print(f"Server request error from {address}: {error}")
-                _send_json(
-                    connection,
-                    error_response(f"Internal server error: {error}"),
-                )
-            finally:
-                _close_socket(connection)
+        request = _decode_request(request_data)
+        response = await _create_response(request)
+        await _send_response(writer, response)
+    except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError):
+        print(f"Client disconnected or timed out: {address}")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        try:
+            await _send_response(writer, error_response(str(error)))
+        except (ConnectionResetError, BrokenPipeError):
+            print(f"Client disconnected before receiving an error: {address}")
+    except Exception as error:
+        print(f"Server request error from {address}: {error}")
+        try:
+            await _send_response(
+                writer,
+                error_response(f"Internal server error: {error}"),
+            )
+        except (ConnectionResetError, BrokenPipeError):
+            print(f"Client disconnected before receiving an error: {address}")
     finally:
-        _close_socket(server_socket)
+        # Always release the connection, including after client failures.
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+
+
+async def start_server() -> None:
+    """Start the asynchronous server and serve clients indefinitely."""
+    server = await asyncio.start_server(handle_client, HOST, PORT)
+    addresses = ", ".join(
+        str(socket.getsockname()) for socket in server.sockets or []
+    )
+    print(f"PixelHub async server listening on {addresses}")
+
+    async with server:
+        await server.serve_forever()
 
 
 if __name__ == "__main__":
-    start_server()
+    asyncio.run(start_server())
