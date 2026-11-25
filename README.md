@@ -1,5 +1,5 @@
 # PixelHub
-
+**Made by Deivid Michael Ruiz Pérez**
 PixelHub is a back-office application that performs CRUD operations for
 users, roles, profiles, posts, categories, and tags.
 
